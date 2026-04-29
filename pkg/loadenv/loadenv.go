@@ -1,3 +1,6 @@
+// Пакет loadenv предоставляет простые утилиты для загрузки файлов в стиле
+// .env в карту, установки переменных окружения глобально или заполнения
+// структуры значениями из окружения через теги.
 package loadenv
 
 import (
@@ -10,6 +13,8 @@ import (
 	"time"
 )
 
+// LoadEnvToMap читает файл env построчно и возвращает карту ключ/значение.
+// Строки, начинающиеся с '#', игнорируются, а префикс 'export ' удаляется.
 func LoadEnvToMap(filename string) (map[string]string, error) {
 	envMap := make(map[string]string)
 
@@ -24,6 +29,8 @@ func LoadEnvToMap(filename string) (map[string]string, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
+		// Разбираем каждую строку на ключ и значение. Пустые строки и комментарии
+		// пропускаются, а некорректные строки игнорируются.
 		key, value, ok, err := parseLine(line)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse line: %w", err)
@@ -38,6 +45,8 @@ func LoadEnvToMap(filename string) (map[string]string, error) {
 	return envMap, scanner.Err()
 }
 
+// LoadEnvGlobal загружает переменные окружения из файла и устанавливает их
+// в окружение текущего процесса с помощью os.Setenv.
 func LoadEnvGlobal(filename string) error {
 	envMap, err := LoadEnvToMap(filename)
 	if err != nil {
@@ -52,6 +61,9 @@ func LoadEnvGlobal(filename string) error {
 	return nil
 }
 
+// LoadEnvToStruct загружает переменные из файла и заполняет структуру,
+// на которую указывает target. Поля структуры должны использовать теги `env`,
+// можно также применять теги `required` и `default`.
 func LoadEnvToStruct(filename string, target any) error {
 	envMap, err := LoadEnvToMap(filename)
 	if err != nil {
@@ -60,6 +72,9 @@ func LoadEnvToStruct(filename string, target any) error {
 	return mapToStruct(envMap, target)
 }
 
+// parseLine разбирает одну строку env на ключ и значение. Она пропускает
+// пустые строки, комментарии и некорректные записи, а также поддерживает
+// необязательный префикс `export`.
 func parseLine(line string) (key, value string, ok bool, err error) {
 	line = strings.TrimPrefix(line, "\uFEFF")
 	line = strings.TrimSpace(line)
@@ -68,12 +83,12 @@ func parseLine(line string) (key, value string, ok bool, err error) {
 		return "", "", false, nil
 	}
 
-	// Поддержка export
+	// Поддержка export: строка может начинаться с "export VAR=value".
 	if after, ok := strings.CutPrefix(line, "export "); ok {
 		line = strings.TrimSpace(after)
 	}
 
-	// Разделение по первому =
+	// Разделение по первому '=': значение может содержать дополнительные '='.
 	before, after, found := strings.Cut(line, "=")
 	if !found {
 		return "", "", false, nil
@@ -93,16 +108,20 @@ func parseLine(line string) (key, value string, ok bool, err error) {
 	return key, value, true, nil
 }
 
+// parseValue нормализует строковое значение из файла env. Она обрабатывает
+// кавычные значения с escape-последовательностями и удаляет inline-комментарии
+// для неквазифицированных значений.
 func parseValue(val string) (string, error) {
 	if val == "" {
 		return "", nil
 	}
 
-	// Если значение в кавычках
+	// Если значение в кавычках: допускаем escape-последовательности внутри
+	// двойных кавычек и поддерживаем одинарные кавычки как простой литерал.
 	if val[0] == '"' || val[0] == '\'' {
 		quote := val[0]
-		closingQuote := strings.Index(val[1:], string(quote))
-		if closingQuote == -1 {
+		closingQuote := strings.LastIndex(val, string(quote))
+		if closingQuote <= 0 {
 			return "", fmt.Errorf("missing closing quote in value: %s", val)
 		}
 		val = val[1 : closingQuote+1]
@@ -143,7 +162,7 @@ func parseValue(val string) (string, error) {
 		return result.String(), nil
 	}
 
-	// Без кавычек — убираем комментарий
+	// Без кавычек — убираем комментарий, начинающийся с '#'.
 	if idx := strings.Index(val, "#"); idx != -1 {
 		val = val[:idx]
 	}
@@ -151,6 +170,9 @@ func parseValue(val string) (string, error) {
 	return strings.TrimSpace(val), nil
 }
 
+// mapToStruct заполняет структуру, на которую указывает target, значениями из
+// env. Поля структуры должны иметь тег `env`; необязательные теги `required`
+// и `default` управляют поведением при отсутствии значения.
 func mapToStruct(env map[string]string, target any) error {
 	v := reflect.ValueOf(target)
 
@@ -166,7 +188,8 @@ func mapToStruct(env map[string]string, target any) error {
 		field := v.Field(i)
 		fieldType := t.Field(i)
 
-		// Берём имя из тега
+		// Берём имя из тега `env`. Тег `required:"true"` делает поле обязательным,
+		// а `default` задаёт значение по умолчанию, если переменная не найдена.
 		key := fieldType.Tag.Get("env")
 		required := fieldType.Tag.Get("required")
 		defaultVal := fieldType.Tag.Get("default")
@@ -176,7 +199,7 @@ func mapToStruct(env map[string]string, target any) error {
 		}
 		val, ok := env[key]
 		if !ok {
-			if required == "true" || defaultVal == "" {
+			if required == "true" {
 				return fmt.Errorf("required env var not set: %s", key)
 			}
 			val = defaultVal
@@ -194,6 +217,8 @@ func mapToStruct(env map[string]string, target any) error {
 	return nil
 }
 
+// setValue конвертирует строку в нужный тип и записывает её в поле структуры.
+// Поддерживаются типы string, знаковые целые, bool, float и time.Duration.
 func setValue(field reflect.Value, val string) error {
 	switch field.Kind() {
 
@@ -208,7 +233,7 @@ func setValue(field reflect.Value, val string) error {
 		field.SetInt(n)
 
 	case reflect.Int64:
-		if field.Type().String() == "time.Duration" {
+		if field.Type() == reflect.TypeOf(time.Duration(0)) {
 			d, err := time.ParseDuration(val)
 			if err != nil {
 				return err
